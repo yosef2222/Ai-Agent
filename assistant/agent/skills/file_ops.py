@@ -14,7 +14,9 @@ MAX_BYTES = 256 * 1024
 _pending = {}
 
 
-def checked_path(path):
+def checked_path(path, *, allow_root=False):
+    if allow_root and path in ("/workspace", "/workspace/"):
+        return WORKSPACE
     if not isinstance(path, str) or not path.startswith("/workspace/") or "\\" in path or "\0" in path:
         raise ValueError("Use an absolute file path inside /workspace.")
     parts = PurePosixPath(path).parts[2:]
@@ -55,7 +57,29 @@ def atomic_write(target, data):
 
 @skill
 def read_file(path: str) -> dict:
-    return success(_read(checked_path(path)).decode("utf-8"))
+    target = checked_path(path, allow_root=True)
+    if target.is_dir():
+        return failure("This path is a directory. Use list_files to see its contents.")
+    if not target.exists():
+        return failure("File not found. Use list_files on its parent directory to check the path.")
+    return success(_read(target).decode("utf-8"))
+
+
+@skill
+def list_files(path: str) -> dict:
+    directory = checked_path(path, allow_root=True)
+    if not directory.is_dir():
+        return failure("Directory not found. Start with /workspace or /workspace/project.")
+    entries = []
+    for entry in sorted(directory.iterdir(), key=lambda item: item.name.casefold()):
+        if entry.name.casefold() in {".git", ".assistant"} or entry.is_symlink():
+            continue
+        if entry.is_file() or entry.is_dir():
+            entries.append({"path": f"/workspace/{entry.relative_to(WORKSPACE).as_posix()}",
+                            "type": "directory" if entry.is_dir() else "file"})
+        if len(entries) > 100:
+            break
+    return success({"entries": entries[:100], "truncated": len(entries) > 100})
 
 
 @skill

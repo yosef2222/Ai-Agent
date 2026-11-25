@@ -97,7 +97,7 @@ def github_commit(message: str, files: list) -> dict:
     if not isinstance(message, str) or not 1 <= len(message.strip()) <= 500 or "\0" in message:
         return failure("Provide a commit message between 1 and 500 characters.")
     if not isinstance(files, list) or not 1 <= len(files) <= 100:
-        return failure("Provide a list of 1 to 100 project files.")
+        return failure("Provide 1 to 100 specific file paths in the files list. Use list_files in /workspace/project if needed.")
     paths = _paths(files)
     remote, authorization = publish_target()
     status = changes(*paths)

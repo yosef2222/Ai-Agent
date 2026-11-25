@@ -7,7 +7,7 @@ from threading import Event
 
 from agent.harness import WORK_LOCK, run
 from agent.skills.file_ops import approve_overwrite
-from agent.skills.telegram_ops import send_telegram, telegram_request, telegram_settings
+from agent.skills.telegram_ops import TelegramError, send_telegram, telegram_request, telegram_settings
 from autonomous.scheduler import start_scheduler
 
 LOGGER = logging.getLogger(__name__)
@@ -41,13 +41,13 @@ def poll(token, owner_id, stop):
     while not stop.is_set():
         try:
             updates = telegram_request(token, "getUpdates", {
-                "offset": offset, "timeout": 20, "allowed_updates": ["message"],
+                "offset": offset, "timeout": 15, "allowed_updates": ["message"],
             })
             if not isinstance(updates, list):
-                raise RuntimeError("Telegram returned an invalid update list.")
-        except RuntimeError as error:
+                raise TelegramError("getUpdates", "Telegram returned an invalid update list.")
+        except TelegramError as error:
             LOGGER.warning("%s", error)
-            stop.wait(5)
+            stop.wait(error.retry_after or 5)
             continue
         for update in updates:
             if stop.is_set():

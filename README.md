@@ -10,6 +10,8 @@ The assistant accepts tasks from one Telegram account, calls Llama 3.1 8B throug
 
 Ollama has 120 seconds to answer each model request, including the first load of Llama 3.1. Set `OLLAMA_TIMEOUT_SECONDS` in `assistant/.env` to change that budget, then run `docker compose up -d` from `assistant` to apply the setting to both services. The other tools use their own 30-second limits.
 
+Web search tries DuckDuckGo first and sends the query to the Bing RSS search endpoint if DuckDuckGo fails or has no usable results. Set `BING_SEARCH_FALLBACK=0` in `.env` to use DuckDuckGo exclusively.
+
 Docker Desktop uses Linux containers. On native Linux, the bind-mounted `assistant/workspace` must be writable by UID `10001`. The internal networks use Docker's isolated bridge gateway mode. [Docker bridge gateway modes](https://docs.docker.com/engine/network/port-publishing/#gateway-modes)
 
 ## Enable GitHub and backlog work
@@ -20,4 +22,4 @@ Docker Desktop uses Linux containers. On native Linux, the bind-mounted `assista
 
 The assistant marks a successful entry `[x]`, writes a daily Markdown report under `workspace/reports`, and publishes a copy under `reports/` in the project checkout. It commits the task's changed files, the backlog, and the report together and pushes to `origin main`. A failed push is retried before any new task. Failed task attempts are recorded in the local daily report. Report dates default to `Asia/Tomsk` through the supplied `.env.example`.
 
-The assistant has one writable host mount at `/workspace`. The gateway permits GitHub, Telegram, DuckDuckGo, and the local Ollama chat endpoint. Python snippets run in a separate read-only container with temporary space under its own `/workspace`; the runner receives neither the host workspace nor service credentials. Stop the stack with `docker compose down`.
+The assistant has one writable host mount at `/workspace`. The gateway permits GitHub, Telegram, DuckDuckGo, Bing search, and the local Ollama chat endpoint. Python snippets run in a separate read-only container with temporary space under its own `/workspace`. The runner receives no host workspace or service credentials. Stop the stack with `docker compose down`.
