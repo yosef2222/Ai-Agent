@@ -1,0 +1,9 @@
+**
+!requirements.txt
+!docker/
+!docker/**
+!agent/
+!agent/**
+!autonomous/
+!autonomous/**
+**/__pycache__

@@ -1,0 +1,63 @@
+x-sandbox: &sandbox
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  restart: on-failure
+  init: true
+  ipc: none
+  pids_limit: 64
+
+services:
+  assistant:
+    <<: *sandbox
+    stop_grace_period: 6m
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: assistant
+    depends_on: [gateway, runner]
+    env_file:
+      - ${ASSISTANT_ENV_FILE:-.env}
+    environment:
+      HTTP_PROXY: http://gateway:8080
+      HTTPS_PROXY: http://gateway:8080
+      NO_PROXY: runner
+      RUNNER_URL: http://runner:8081/run
+    volumes:
+      - type: bind
+        source: ./workspace
+        target: /workspace
+    networks: [outbound, execution]
+
+  gateway:
+    <<: *sandbox
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: gateway
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    networks: [outbound, uplink]
+
+  runner:
+    <<: *sandbox
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: runner
+    networks: [execution]
+    tmpfs:
+      - /workspace:rw,nosuid,nodev,noexec,size=8m,uid=10001,gid=10001,mode=0700
+    mem_limit: 512m
+    cpus: 1
+
+networks:
+  outbound:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+  execution:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+  uplink: {}
