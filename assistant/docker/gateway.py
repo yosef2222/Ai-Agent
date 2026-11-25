@@ -17,7 +17,8 @@ ALLOWED = {
     "links.duckduckgo.com:443",
     "html.duckduckgo.com:443",
     "lite.duckduckgo.com:443",
-    "www.bing.com:443",
+    "api.mwmbl.org:443",
+    "en.wiktionary.org:443",
 }
 OLLAMA = "http://localhost:11434/api/chat"
 LIMIT = 4 * 1024 * 1024

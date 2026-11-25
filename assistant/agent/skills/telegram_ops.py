@@ -5,6 +5,7 @@ import time
 import requests
 
 from agent.results import failure, skill, success
+from agent.tool_protocol import looks_like_tool_protocol
 
 
 class TelegramError(RuntimeError):
@@ -66,6 +67,8 @@ def telegram_request(token, method, payload):
 def send_telegram(message: str) -> dict:
     if not isinstance(message, str) or not message.strip():
         return failure("Telegram message must be a nonempty string.")
+    if looks_like_tool_protocol(message):
+        return failure("Tool-call syntax cannot be sent to Telegram.")
     token, chat_id = telegram_settings()
     text = message.strip().encode("utf-16-le", errors="replace")[:8000].decode("utf-16-le", errors="ignore")
     payload = {"chat_id": chat_id, "text": text}

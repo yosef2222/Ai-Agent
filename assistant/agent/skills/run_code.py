@@ -3,12 +3,15 @@ import os
 import requests
 
 from agent.results import failure, skill
-from agent.skills.code_policy import validate
+from agent.skills.code_policy import ProhibitedCodeError, validate
 
 
 @skill
 def run_code(code: str, timeout: int = 30) -> dict:
-    validate(code, timeout)
+    try:
+        validate(code, timeout)
+    except ProhibitedCodeError as error:
+        return failure(str(error), {"prohibited": True})
     url = os.environ.get("RUNNER_URL", "http://runner:8081/run")
     try:
         with requests.Session() as session:
