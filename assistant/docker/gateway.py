@@ -1,11 +1,15 @@
 """Forward HTTPS for the allowlist and the single local Ollama endpoint."""
 
 import http.client
+import logging
 import select
 import socket
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from agent.ollama_config import CONNECT_TIMEOUT, RESPONSE_TIMEOUT
+
+LOGGER = logging.getLogger(__name__)
 ALLOWED = {
     "api.telegram.org:443",
     "github.com:443",
@@ -54,6 +58,12 @@ class Gateway(BaseHTTPRequestHandler):
                 return
 
     def do_POST(self):
+        try:
+            self._forward_ollama()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def _forward_ollama(self):
         if self.path != OLLAMA:
             self.send_error(403, "Destination is not allowed")
             return
@@ -64,13 +74,23 @@ class Gateway(BaseHTTPRequestHandler):
         if not 0 < size <= LIMIT:
             self.send_error(400, "Invalid request size")
             return
-        upstream = http.client.HTTPConnection("host.docker.internal", 11434, timeout=TIMEOUT)
+        upstream = http.client.HTTPConnection("host.docker.internal", 11434, timeout=CONNECT_TIMEOUT)
         try:
             upstream.request("POST", "/api/chat", self.rfile.read(size), {"Content-Type": "application/json"})
+        except (OSError, http.client.HTTPException):
+            upstream.close()
+            self.send_error(502, "Could not reach Ollama")
+            return
+        try:
+            upstream.sock.settimeout(RESPONSE_TIMEOUT)
             response = upstream.getresponse()
             data = response.read(LIMIT + 1)
+        except TimeoutError:
+            LOGGER.warning("Ollama exceeded the %s-second response timeout.", RESPONSE_TIMEOUT)
+            self.send_error(504, "Ollama response timed out")
+            return
         except (OSError, http.client.HTTPException):
-            self.send_error(502, "Could not reach Ollama")
+            self.send_error(502, "Could not read the Ollama response")
             return
         finally:
             upstream.close()

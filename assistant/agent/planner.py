@@ -5,6 +5,8 @@ import re
 
 import requests
 
+from agent.ollama_config import CONNECT_TIMEOUT, RESPONSE_TIMEOUT
+
 OLLAMA_URL = "http://localhost:11434/api/chat"
 SYSTEM_PROMPT = """You are a personal AI assistant. You run inside a Docker
 sandbox. You can only act by calling tools.
@@ -25,17 +27,38 @@ Rules:
 _TOOL_CALL = re.compile(r"TOOL: ([a-z_][a-z0-9_]*)\r?\nARGS: ([^\r\n]+)")
 
 
+class OllamaError(RuntimeError):
+    """An Ollama failure safe to show to the owner."""
+
+
 def ask_llm(messages: list) -> str:
-    response = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": "llama3.1", "stream": False,
-            "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *messages],
-        },
-        timeout=30,
-        allow_redirects=False,
-    )
-    response.raise_for_status()
+    timeout_message = f"Ollama took too long to reply. Try again or increase OLLAMA_TIMEOUT_SECONDS (currently {RESPONSE_TIMEOUT})."
+    try:
+        response = requests.post(
+            OLLAMA_URL,
+            json={
+                "model": "llama3.1", "stream": False,
+                "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *messages],
+            },
+            # The gateway connects to Ollama before its response timer starts.
+            timeout=(CONNECT_TIMEOUT, RESPONSE_TIMEOUT + 2 * CONNECT_TIMEOUT),
+            allow_redirects=False,
+        )
+        if response.status_code == 504:
+            raise OllamaError(timeout_message)
+        if response.status_code == 502:
+            raise OllamaError("The gateway could not get a reply from Ollama. Check the host Ollama service and logs.")
+        if response.status_code == 404:
+            raise OllamaError("Ollama could not find llama3.1. Run ollama pull llama3.1 on the host.")
+        response.raise_for_status()
+    except requests.ConnectTimeout as error:
+        raise OllamaError("Could not connect to the Ollama gateway. Check that the gateway is running.") from error
+    except requests.Timeout as error:
+        raise OllamaError(timeout_message) from error
+    except requests.ConnectionError as error:
+        raise OllamaError("Could not connect to the Ollama gateway. Check that the gateway is running.") from error
+    except requests.RequestException as error:
+        raise OllamaError("Ollama rejected the request. Check the host Ollama logs.") from error
     content = response.json()["message"]["content"]
     if not isinstance(content, str) or not content.strip():
         raise ValueError("Ollama returned an empty reply.")

@@ -9,6 +9,7 @@ WORKDIR /workspace
 
 FROM base AS gateway
 COPY docker/gateway.py /app/gateway.py
+COPY agent/__init__.py agent/ollama_config.py /app/agent/
 USER agent
 CMD ["python", "/app/gateway.py"]
 

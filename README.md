@@ -8,6 +8,8 @@ The assistant accepts tasks from one Telegram account, calls Llama 3.1 8B throug
 2. In PowerShell, run `cd assistant` and `Copy-Item .env.example .env`. Fill in `TELEGRAM_TOKEN` and your numeric private `TELEGRAM_CHAT_ID`. Open the bot's private chat and send `/start`. The bot uses polling, so use a bot with no webhook configured.
 3. Run `docker compose up --build -d` and `docker compose logs -f assistant`. Send the bot a task, such as `Create /workspace/hello.txt containing Hello`. If a task needs to overwrite an existing file, the bot sends a one-time `/approve` command that expires after 15 minutes.
 
+Ollama has 120 seconds to answer each model request, including the first load of Llama 3.1. Set `OLLAMA_TIMEOUT_SECONDS` in `assistant/.env` to change that budget, then run `docker compose up -d` from `assistant` to apply the setting to both services. The other tools use their own 30-second limits.
+
 Docker Desktop uses Linux containers. On native Linux, the bind-mounted `assistant/workspace` must be writable by UID `10001`. The internal networks use Docker's isolated bridge gateway mode. [Docker bridge gateway modes](https://docs.docker.com/engine/network/port-publishing/#gateway-modes)
 
 ## Enable GitHub and backlog work
