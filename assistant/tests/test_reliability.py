@@ -15,6 +15,46 @@ from agent.skills.code_policy import PROHIBITED_REPLY
 
 
 class ToolReliabilityTests(unittest.TestCase):
+    def test_plain_reads_use_workspace_without_ollama(self):
+        temp_base = "/workspace" if Path("/workspace").is_dir() else None
+        with TemporaryDirectory(dir=temp_base) as temp, patch.object(file_ops, "WORKSPACE", Path(temp)), \
+                patch.object(harness, "ask_llm") as ask, \
+                patch.object(harness, "send_telegram", return_value=success({})) as send:
+            (Path(temp) / "hello.txt").write_text("hello")
+            (Path(temp) / "empty.txt").touch()
+            self.assertEqual(harness.run("read hello.txt"), "hello")
+            self.assertEqual(harness.run("read /workspace/empty.txt"), "empty.txt is empty.")
+            self.assertIn("File not found", harness.run("read missing.txt"))
+            self.assertIn("outside", harness.run("read ../hello.txt"))
+            self.assertEqual(send.call_count, 4)
+        ask.assert_not_called()
+
+    def test_large_and_whitespace_sensitive_reads_attach_exact_bytes(self):
+        temp_base = "/workspace" if Path("/workspace").is_dir() else None
+        with TemporaryDirectory(dir=temp_base) as temp, patch.object(file_ops, "WORKSPACE", Path(temp)), \
+                patch.object(harness, "ask_llm") as ask, patch.object(harness, "send_telegram") as send, \
+                patch.object(harness, "send_telegram_file", return_value=success({})) as attach:
+            big = b"A" * 10000
+            (Path(temp) / "big.txt").write_bytes(big)
+            self.assertEqual(harness.run("read big.txt"), "big.txt contains 10,000 characters.")
+            attach.assert_called_once_with("big.txt", big, caption="big.txt contains 10,000 characters.")
+            raw = b"hello\r\n"
+            (Path(temp) / "notes with spaces.txt").write_bytes(raw)
+            harness.run('read "notes with spaces.txt"')
+            self.assertEqual(attach.call_args.args, ("notes with spaces.txt", raw))
+        send.assert_not_called()
+        ask.assert_not_called()
+
+    def test_attachment_failure_reports_delivery_status_without_resending_file(self):
+        with patch.object(harness, "call_tool", return_value=success("A" * 10000)), \
+                patch.object(harness, "send_telegram_file", return_value=failure("Unconfirmed request.")) as attach, \
+                patch.object(harness, "send_telegram", return_value=success({})) as send:
+            outcome = harness._run("read big.txt")
+        self.assertEqual(outcome.errors, ["Unconfirmed request."])
+        self.assertIn("could not confirm delivery of the attachment", outcome.answer)
+        attach.assert_called_once()
+        send.assert_called_once_with(outcome.answer)
+
     def test_native_tool_schema_and_response(self):
         with patch.object(planner.requests, "post") as post:
             post.return_value.status_code = 200
@@ -82,7 +122,9 @@ class ToolReliabilityTests(unittest.TestCase):
         self.assertTrue(outcome.succeeded)
         messages = ask.call_args.args[0]
         self.assertNotIn("A" * 1001, json.dumps(messages))
-        self.assertEqual(json.loads(messages[-1]["content"])["result"]["characters"], 10000)
+        self.assertEqual(json.loads(messages[-1]["content"])["result"], {
+            "characters": 10000, "repeated_character": "A", "truncated": True,
+        })
 
     def test_repeated_write_expands_in_file_tool_and_obeys_byte_limit(self):
         temp_base = "/workspace" if Path("/workspace").is_dir() else None
@@ -294,6 +336,19 @@ class RequestBoundaryTests(unittest.TestCase):
 
 
 class TelegramReliabilityTests(unittest.TestCase):
+    def test_file_upload_uses_multipart_to_the_configured_owner(self):
+        data = b"A" * 10000
+        with patch.object(telegram_ops, "telegram_settings", return_value=("dummy", 42)), \
+                patch.object(telegram_ops.requests, "post") as post:
+            post.return_value.ok = True
+            post.return_value.json.return_value = {"ok": True, "result": {"message_id": 99}}
+            result = telegram_ops.send_telegram_file("big.txt", data, "10,000 characters.")
+        self.assertTrue(result["ok"])
+        self.assertTrue(post.call_args.args[0].endswith("/sendDocument"))
+        self.assertEqual(post.call_args.kwargs["data"], {"chat_id": 42, "caption": "10,000 characters."})
+        self.assertEqual(post.call_args.kwargs["files"], {"document": ("big.txt", data, "text/plain")})
+        self.assertNotIn("json", post.call_args.kwargs)
+
     def test_send_tool_cannot_deliver_internal_json(self):
         raw = '{"tool_calls": [{"function": {"name": "run_code", "arguments": {"code": "import os"}}}]}'
         with patch.object(telegram_ops, "telegram_request") as telegram:

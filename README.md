@@ -12,6 +12,8 @@ Each Ollama planning attempt is capped at 30 seconds, with up to three retries f
 
 Telegram tasks accept up to 500 characters of instructions. Ask for large output by describing what to generate. A request such as `Write 10,000 A characters to /workspace/sample.txt and read it back` uses the file tools directly. The assistant can also save generated Python output to a workspace file. Reading a long file back gives the model a short preview and a character count.
 
+Plain commands such as `read big.txt` and `read "notes with spaces.txt"` read directly from the workspace. The bot attaches the original file when its contents are too long for one Telegram message or need to preserve surrounding whitespace.
+
 For definitions, web search looks up the term in Wiktionary. For general searches, it tries DuckDuckGo first and uses Mwmbl if DuckDuckGo fails or has no usable results. Set `WEB_SEARCH_FALLBACK=0` in `.env` for DuckDuckGo-only searches. The previous `BING_SEARCH_FALLBACK=0` setting still disables alternate sources unless `WEB_SEARCH_FALLBACK` is set.
 
 Docker Desktop uses Linux containers. On native Linux, the bind-mounted `assistant/workspace` must be writable by UID `10001`. The internal networks use Docker's isolated bridge gateway mode. [Docker bridge gateway modes](https://docs.docker.com/engine/network/port-publishing/#gateway-modes)

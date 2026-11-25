@@ -12,7 +12,7 @@ from agent.planner import OllamaError, ask_llm, parse_tool_call
 from agent.request_paths import OUTSIDE_WORKSPACE, is_file_command, mentions_outside_path
 from agent.results import failure
 from agent.skills.code_policy import PROHIBITED_REPLY, contains_prohibited_code
-from agent.skills.telegram_ops import send_telegram
+from agent.skills.telegram_ops import TEXT_LIMIT, send_telegram, send_telegram_file
 from agent.tool_protocol import looks_like_tool_protocol
 
 LOGGER = logging.getLogger(__name__)
@@ -25,6 +25,11 @@ _CODE_CONTEXT = re.compile(
     r"|\b(?:cat|head|tail|less|Get-Content)\s+", re.IGNORECASE,
 )
 _REPEAT_NUMBER = re.compile(r"[0-9]{1,6}")
+_READ_REQUEST = re.compile(
+    r"""^\s*(?:(?:please|(?:can|could|would)\s+you)\s+)*read\s+(?:the\s+file\s+)?"""
+    r"""(?P<path>"[^"\r\n]+"|'[^'\r\n]+'|`[^`\r\n]+`|[^\s"'`]+)\s*$""",
+    re.IGNORECASE,
+)
 _REPEATED_FILE_REQUEST = re.compile(
     r"^\s*(?:(?:please|(?:can|could|would)\s+you)\s+)*write(?:\s+exactly)?\s+"
     r"(?P<count>[0-9]{1,6}|[0-9]{1,3}(?:,[0-9]{3}){1,2})\s+"
@@ -52,6 +57,7 @@ class Outcome:
     succeeded: bool = False
     errors: list[str] = field(default_factory=list)
     files_changed: list[str] = field(default_factory=list)
+    document: tuple[str, bytes] | None = None
 
 
 def _blocked_code(text):
@@ -93,6 +99,8 @@ def _call(tool, autonomous, last_stdout=None):
 
 
 def _preview(text):
+    if text and text.count(text[0]) == len(text):
+        return {"characters": len(text), "repeated_character": text[0], "truncated": True}
     return {"characters": len(text), "preview": text[:MAX_CONTENT_LENGTH], "truncated": True}
 
 
@@ -112,6 +120,22 @@ def _tool_output(name, result):
 
 def _overwrite_reply(data):
     return f"Overwrite {data['path']}? To approve, send {data['command']} within 15 minutes."
+
+
+def _read_workspace_file(path):
+    path = path if path.startswith("/") else f"/workspace/{path}"
+    result = call_tool("read_file", {"path": path})
+    if not result["ok"]:
+        return Outcome(result["error"], errors=[result["error"]])
+    text = result["result"]
+    filename = PurePosixPath(path).name
+    if not text:
+        return Outcome(f"{filename} is empty.", succeeded=True)
+    if (len(text.encode("utf-16-le")) <= TEXT_LIMIT * 2 and text.strip() == text
+            and not looks_like_tool_protocol(text) and not _blocked_code(text)):
+        return Outcome(text, succeeded=True)
+    return Outcome(f"{filename} contains {len(text):,} characters.", succeeded=True,
+                   document=(filename, text.encode("utf-8")))
 
 
 def _write_and_read_repeated_text(request):
@@ -150,6 +174,13 @@ def _loop(task, autonomous):
         if outside_path and is_file_command(task):
             return Outcome(OUTSIDE_WORKSPACE, errors=[OUTSIDE_WORKSPACE])
         if not autonomous and not outside_path:
+            read_request = _READ_REQUEST.fullmatch(task)
+            if read_request:
+                path = read_request["path"]
+                if path[0] in "\"'`":
+                    path = path[1:-1]
+                if "://" not in path:
+                    return _read_workspace_file(path)
             repeat_request = _REPEATED_FILE_REQUEST.fullmatch(task)
             if repeat_request:
                 return _write_and_read_repeated_text(repeat_request)
@@ -247,10 +278,17 @@ def _run(task, autonomous=False):
         outcome = Outcome(PROHIBITED_REPLY, errors=[*outcome.errors, PROHIBITED_REPLY], files_changed=outcome.files_changed)
     elif looks_like_tool_protocol(outcome.answer):
         outcome = Outcome(_INVALID_REPLY, errors=[*outcome.errors, _INVALID_REPLY], files_changed=outcome.files_changed)
-    delivery = send_telegram(outcome.answer)
+    delivery = (send_telegram_file(*outcome.document, caption=outcome.answer) if outcome.document
+                else send_telegram(outcome.answer))
     if not delivery["ok"]:
         LOGGER.warning("Final answer delivery failed. %s", delivery["error"])
         outcome.errors.append(delivery["error"])
+        if outcome.document:
+            outcome.answer += "\n\nTelegram could not confirm delivery of the attachment."
+            notice = send_telegram(outcome.answer)
+            if not notice["ok"]:
+                LOGGER.warning("Attachment status delivery failed. %s", notice["error"])
+                outcome.errors.append(notice["error"])
     return outcome
 
 
