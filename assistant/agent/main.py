@@ -20,12 +20,12 @@ def handle_update(update, owner_id):
     if chat.get("id") != owner_id or chat.get("type") != "private" or sender.get("id") != owner_id:
         return
     task = message.get("text")
-    if not isinstance(task, str) or not task.strip():
+    if not isinstance(task, str):
         return
-    task = task.strip()
+    command = task.strip()
     with WORK_LOCK:
-        if task.split(maxsplit=1)[0] == "/approve":
-            match = re.fullmatch(r"/approve\s+([0-9a-f]{16})", task)
+        if command and command.split(maxsplit=1)[0] == "/approve":
+            match = re.fullmatch(r"/approve\s+([0-9a-f]{16})", command)
             if match is None:
                 send_telegram("Send the /approve command shown in the overwrite request.")
                 return

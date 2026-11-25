@@ -22,7 +22,7 @@ services:
       HTTP_PROXY: http://gateway:8080
       HTTPS_PROXY: http://gateway:8080
       NO_PROXY: runner
-      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-120}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-30}
       RUNNER_URL: http://runner:8081/run
     volumes:
       - type: bind
@@ -37,7 +37,7 @@ services:
       dockerfile: docker/Dockerfile
       target: gateway
     environment:
-      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-120}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-30}
     extra_hosts:
       - host.docker.internal:host-gateway
     networks: [outbound, uplink]

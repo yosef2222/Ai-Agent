@@ -3,23 +3,25 @@
 from inspect import Parameter, signature
 
 from agent.results import failure
-from agent.skills.file_ops import list_files, read_file, write_file
+from agent.skills.file_ops import list_files, read_file, save_code_output, write_file
 from agent.skills.github_ops import github_commit
 from agent.skills.run_code import run_code
 from agent.skills.telegram_ops import send_telegram
 from agent.skills.web_search import web_search
 
-TOOLS = {tool.__name__: tool for tool in (web_search, list_files, read_file, write_file, run_code, github_commit, send_telegram)}
+TOOLS = {tool.__name__: tool for tool in (web_search, list_files, read_file, write_file, run_code, save_code_output,
+                                        github_commit, send_telegram)}
 
 _STRING = {"type": "string"}
 _SCHEMAS = {
     "web_search": ("Search the web and get source links. Include the full subject and context in the query.", {"query": _STRING}),
     "list_files": ("List immediate entries in a workspace directory. Start at /workspace if unsure.", {"path": _STRING}),
-    "read_file": ("Read an existing UTF-8 file by its absolute /workspace path.", {"path": _STRING}),
-    "write_file": ("Create a UTF-8 file. Provide the full absolute /workspace path and the complete file content.",
-                   {"path": _STRING, "content": _STRING}),
+    "read_file": ("Read a UTF-8 workspace file. Long files return a preview and character count to the model.", {"path": _STRING}),
+    "write_file": ("Create a UTF-8 workspace file. For repeated text, pass one copy in content and set repeat to the count.",
+                   {"path": _STRING, "content": _STRING, "repeat": {"type": "integer", "minimum": 1}}),
     "run_code": ("Run isolated Python for calculations or small examples. The runner has no project files or network.",
                  {"code": _STRING, "timeout": {"type": "integer", "minimum": 1, "maximum": 30}}),
+    "save_code_output": ("Save the latest successful run_code output directly as a workspace file.", {"path": _STRING}),
     "github_commit": ("Commit named files from /workspace/project and push to the configured GitHub main branch.",
                       {"message": _STRING, "files": {"type": "array", "items": _STRING, "minItems": 1, "maxItems": 100}}),
     "send_telegram": ("Send a separate Telegram message to the owner when explicitly requested.", {"message": _STRING}),

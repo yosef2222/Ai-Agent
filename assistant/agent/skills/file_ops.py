@@ -83,13 +83,16 @@ def list_files(path: str) -> dict:
 
 
 @skill
-def write_file(path: str, content: str) -> dict:
+def write_file(path: str, content: str, repeat: int = 1) -> dict:
     target = checked_path(path)
     if not isinstance(content, str):
         return failure("Content must be a string.")
+    if type(repeat) is not int or not 1 <= repeat <= MAX_BYTES:
+        return failure("Repeat must be a positive integer within the file size limit.")
     data = content.encode("utf-8")
-    if len(data) > MAX_BYTES:
+    if len(data) * repeat > MAX_BYTES:
         return failure("Content exceeds the 256 KiB tool limit.")
+    data *= repeat
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         with target.open("xb") as stream:
@@ -106,7 +109,14 @@ def write_file(path: str, content: str) -> dict:
         return failure("File exists. The owner must approve the overwrite.", {
             "path": path, "confirmation_required": True, "command": f"/approve {approval}",
         })
-    return success({"path": path, "bytes_written": len(data)})
+    return success({"path": path, "bytes_written": len(data), "characters_written": len(content) * repeat})
+
+
+@skill
+def save_code_output(path: str, *, stdout: str | None = None) -> dict:
+    if stdout is None:
+        return failure("Run code successfully before saving its output.")
+    return write_file(path, stdout)
 
 
 @skill

@@ -8,7 +8,9 @@ The assistant accepts tasks from one Telegram account, calls Llama 3.1 8B throug
 2. In PowerShell, run `cd assistant` and `Copy-Item .env.example .env`. Fill in `TELEGRAM_TOKEN` and your numeric private `TELEGRAM_CHAT_ID`. Open the bot's private chat and send `/start`. The bot uses polling, so use a bot with no webhook configured.
 3. Run `docker compose up --build -d` and `docker compose logs -f assistant`. Send the bot a task, such as `Create /workspace/hello.txt containing Hello`. If a task needs to overwrite an existing file, the bot sends a one-time `/approve` command that expires after 15 minutes.
 
-Ollama has 120 seconds to answer each model request, including the first load of Llama 3.1. Set `OLLAMA_TIMEOUT_SECONDS` in `assistant/.env` to change that budget, then run `docker compose up -d` from `assistant` to apply the setting to both services. The other tools use their own 30-second limits.
+Each Ollama planning attempt is capped at 30 seconds, with up to three retries for transient failures. The gateway shares a separate model preload across retries so a cold start can finish without submitting the owner's prompt again during loading. `OLLAMA_TIMEOUT_SECONDS` in `assistant/.env` can lower the per-attempt limit. Run `docker compose up -d` from `assistant` to apply changes.
+
+Telegram tasks accept up to 500 characters of instructions. Ask for large output by describing what to generate. A request such as `Write 10,000 A characters to /workspace/sample.txt and read it back` uses the file tools directly. The assistant can also save generated Python output to a workspace file. Reading a long file back gives the model a short preview and a character count.
 
 For definitions, web search looks up the term in Wiktionary. For general searches, it tries DuckDuckGo first and uses Mwmbl if DuckDuckGo fails or has no usable results. Set `WEB_SEARCH_FALLBACK=0` in `.env` for DuckDuckGo-only searches. The previous `BING_SEARCH_FALLBACK=0` setting still disables alternate sources unless `WEB_SEARCH_FALLBACK` is set.
 

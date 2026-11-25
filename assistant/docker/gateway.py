@@ -1,13 +1,17 @@
 """Forward HTTPS for the allowlist and the single local Ollama endpoint."""
 
 import http.client
+import json
 import logging
 import select
 import socket
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Lock
 
-from agent.ollama_config import CONNECT_TIMEOUT, RESPONSE_TIMEOUT
+from agent.ollama_config import CONNECT_TIMEOUT, OLLAMA_MODEL, RESPONSE_TIMEOUT
 
 LOGGER = logging.getLogger(__name__)
 ALLOWED = {
@@ -23,6 +27,45 @@ ALLOWED = {
 OLLAMA = "http://localhost:11434/api/chat"
 LIMIT = 4 * 1024 * 1024
 TIMEOUT = 30
+MODEL_LOAD_TIMEOUT = 120
+_model_loader = ThreadPoolExecutor(max_workers=1)
+_model_lock = Lock()
+_model_load = None
+_model_ready_until = 0
+
+
+def _mark_model_ready(seconds=240):
+    global _model_ready_until
+    with _model_lock:
+        # Keep a shorter lease than Ollama's five-minute keep-alive.
+        _model_ready_until = time.monotonic() + seconds
+
+
+def _load_model():
+    payload = json.dumps({"model": OLLAMA_MODEL, "messages": [], "stream": False, "keep_alive": "5m"})
+    with closing(http.client.HTTPConnection("host.docker.internal", 11434, timeout=CONNECT_TIMEOUT)) as upstream:
+        try:
+            upstream.request("POST", "/api/chat", payload, {"Content-Type": "application/json"})
+            upstream.sock.settimeout(MODEL_LOAD_TIMEOUT)
+            response = upstream.getresponse()
+            response.read(LIMIT + 1)
+            status = response.status
+        except (OSError, http.client.HTTPException):
+            return 502
+    if status == 200:
+        _mark_model_ready()
+    return status
+
+
+def _wait_for_model(timeout):
+    global _model_load
+    with _model_lock:
+        if time.monotonic() < _model_ready_until:
+            return 200
+        if _model_load is None or _model_load.done():
+            _model_load = _model_loader.submit(_load_model)
+        load = _model_load
+    return load.result(timeout=timeout)
 
 
 class Gateway(BaseHTTPRequestHandler):
@@ -76,29 +119,41 @@ class Gateway(BaseHTTPRequestHandler):
         if not 0 < size <= LIMIT:
             self.send_error(400, "Invalid request size")
             return
-        upstream = http.client.HTTPConnection("host.docker.internal", 11434, timeout=CONNECT_TIMEOUT)
+        payload = self.rfile.read(size)
+        deadline = time.monotonic() + RESPONSE_TIMEOUT * 0.98
         try:
-            upstream.request("POST", "/api/chat", self.rfile.read(size), {"Content-Type": "application/json"})
-        except (OSError, http.client.HTTPException):
-            upstream.close()
-            self.send_error(502, "Could not reach Ollama")
-            return
-        try:
-            upstream.sock.settimeout(RESPONSE_TIMEOUT)
-            response = upstream.getresponse()
-            data = response.read(LIMIT + 1)
+            status = _wait_for_model(max(0, deadline - time.monotonic()))
         except TimeoutError:
-            LOGGER.warning("Ollama exceeded the %s-second response timeout.", RESPONSE_TIMEOUT)
-            self.send_error(504, "Ollama response timed out")
+            self.send_error(504, "Ollama is warming up")
             return
-        except (OSError, http.client.HTTPException):
-            self.send_error(502, "Could not read the Ollama response")
+        if status != 200:
+            self.send_error(404 if status == 404 else 502, "Could not load the Ollama model")
             return
-        finally:
-            upstream.close()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            self.send_error(504, "Ollama is warming up")
+            return
+        with closing(http.client.HTTPConnection("host.docker.internal", 11434,
+                                               timeout=min(CONNECT_TIMEOUT, remaining))) as upstream:
+            try:
+                upstream.request("POST", "/api/chat", payload, {"Content-Type": "application/json"})
+                upstream.sock.settimeout(max(0.001, deadline - time.monotonic()))
+                response = upstream.getresponse()
+                data = response.read(LIMIT + 1)
+            except TimeoutError:
+                _mark_model_ready(0)
+                LOGGER.warning("Ollama exceeded the %s-second response timeout.", RESPONSE_TIMEOUT)
+                self.send_error(504, "Ollama response timed out")
+                return
+            except (OSError, http.client.HTTPException):
+                _mark_model_ready(0)
+                self.send_error(502, "Could not read the Ollama response")
+                return
         if len(data) > LIMIT:
             self.send_error(502, "Ollama response exceeded the size limit")
             return
+        if response.status == 200:
+            _mark_model_ready()
         self.send_response(response.status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))

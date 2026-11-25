@@ -4,13 +4,20 @@ import ast
 import re
 
 _FORBIDDEN = re.compile(
-    r"\bimport\s+(?:os|sys|subprocess)(?:\b|\.)|\b__import__\b|\b(?:eval|exec)\s*\(|\bopen\s*\(\s*['\"]?/"
+    r"\bfrom\s+(?:os|sys|subprocess)\b"
+    r"|\bimport\s+(?:[\w.]+(?:\s+as\s+\w+)?\s*,\s*)*(?:os|sys|subprocess)\b"
+    r"|\b__import__\b|\b(?:eval|exec|open)\s*\("
 )
 _MODULES = {"os", "sys", "subprocess"}
+PROHIBITED_REPLY = "That operation is not allowed."
 
 
 class ProhibitedCodeError(ValueError):
     pass
+
+
+def contains_prohibited_code(text):
+    return isinstance(text, str) and _FORBIDDEN.search(text) is not None
 
 
 def validate(code, timeout):
@@ -18,8 +25,8 @@ def validate(code, timeout):
         raise ValueError("Provide a nonempty Python snippet of up to 64 KiB.")
     if type(timeout) is not int or not 1 <= timeout <= 30:
         raise ValueError("Timeout must be an integer between 1 and 30 seconds.")
-    if _FORBIDDEN.search(code):
-        raise ProhibitedCodeError("The snippet contains a prohibited operation.")
+    if contains_prohibited_code(code):
+        raise ProhibitedCodeError(PROHIBITED_REPLY)
     try:
         syntax = ast.parse(code)
     except SyntaxError as error:
@@ -31,4 +38,4 @@ def validate(code, timeout):
         elif isinstance(node, ast.ImportFrom) and node.module:
             modules = [node.module]
         if any(module.split(".", 1)[0] in _MODULES for module in modules):
-            raise ProhibitedCodeError("The snippet imports a prohibited module.")
+            raise ProhibitedCodeError(PROHIBITED_REPLY)

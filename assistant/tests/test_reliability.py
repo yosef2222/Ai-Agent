@@ -8,9 +8,10 @@ from unittest.mock import patch
 import requests
 from duckduckgo_search.exceptions import RatelimitException
 
-from agent import harness, mcp, planner
+from agent import harness, main, mcp, planner
 from agent.results import failure, success
 from agent.skills import file_ops, telegram_ops, web_search
+from agent.skills.code_policy import PROHIBITED_REPLY
 
 
 class ToolReliabilityTests(unittest.TestCase):
@@ -28,7 +29,112 @@ class ToolReliabilityTests(unittest.TestCase):
         self.assertEqual(schemas["write_file"]["required"], ["path", "content"])
         self.assertEqual(schemas["run_code"]["required"], ["code"])
         self.assertFalse(schemas["github_commit"]["additionalProperties"])
-        self.assertIn("write_file(path, content)", mcp.call_tool("write_file", {"path": "/workspace/a.txt"})["error"])
+        self.assertIn("missing a required argument: 'content'", mcp.call_tool("write_file", {"path": "/workspace/a.txt"})["error"])
+
+    def test_empty_and_oversized_tasks_do_not_reach_ollama(self):
+        for task, expected in [("  \n", "Task is empty."), ("x" * 501, "Task too long. Max 500 characters.")]:
+            with self.subTest(expected=expected), patch.object(harness, "ask_llm") as ask, \
+                    patch.object(harness, "send_telegram", return_value=success({})) as send:
+                self.assertEqual(harness.run(task), expected)
+                ask.assert_not_called()
+                send.assert_called_once_with(expected)
+
+    def test_owner_message_validates_empty_text_and_raw_input_size(self):
+        base = {"chat": {"id": 7, "type": "private"}, "from": {"id": 7}}
+        with patch.object(harness, "ask_llm") as ask, \
+                patch.object(harness, "send_telegram", return_value=success({})) as send:
+            main.handle_update({"message": {**base, "text": "   "}}, 7)
+            main.handle_update({"message": {**base, "text": "x" + " " * 500}}, 7)
+        self.assertEqual([call.args[0] for call in send.call_args_list],
+                         ["Task is empty.", "Task too long. Max 500 characters."])
+        ask.assert_not_called()
+
+    def test_iteration_limit_terminates_successful_tool_loop(self):
+        reply = 'TOOL: list_files\nARGS: {"path": "/workspace"}'
+        with patch.object(harness, "ask_llm", return_value=reply) as ask, \
+                patch.object(harness, "call_tool", return_value=success({})) as tool, \
+                patch.object(harness, "send_telegram", return_value=success({})) as send:
+            result = harness.run("List files")
+        self.assertEqual(result, "Stopped after 10 planning iterations.")
+        self.assertEqual(ask.call_count, 10)
+        self.assertEqual(tool.call_count, 10)
+        send.assert_called_once_with(result)
+
+    def test_generated_output_moves_directly_to_file_and_readback_is_bounded(self):
+        generated = "A" * 10000
+        replies = [
+            'TOOL: run_code\nARGS: {"code": "print(\'A\' * 10000, end=\'\')"}',
+            'TOOL: save_code_output\nARGS: {"path": "/workspace/large.txt"}',
+            'TOOL: read_file\nARGS: {"path": "/workspace/large.txt"}',
+            "The file contains 10,000 A characters.",
+        ]
+        temp_base = "/workspace" if Path("/workspace").is_dir() else None
+
+        def call_tool(name, args):
+            if name == "run_code":
+                return success({"stdout": generated, "stderr": "", "exit_code": 0})
+            return mcp.call_tool(name, args)
+
+        with TemporaryDirectory(dir=temp_base) as temp, patch.object(file_ops, "WORKSPACE", Path(temp)), \
+                patch.object(harness, "ask_llm", side_effect=replies) as ask, patch.object(harness, "call_tool", side_effect=call_tool):
+            outcome = harness._loop("Write 10000 As to /workspace/large.txt and read it back.", False)
+            self.assertEqual((Path(temp) / "large.txt").read_text(), generated)
+        self.assertTrue(outcome.succeeded)
+        messages = ask.call_args.args[0]
+        self.assertNotIn("A" * 1001, json.dumps(messages))
+        self.assertEqual(json.loads(messages[-1]["content"])["result"]["characters"], 10000)
+
+    def test_repeated_write_expands_in_file_tool_and_obeys_byte_limit(self):
+        temp_base = "/workspace" if Path("/workspace").is_dir() else None
+        with TemporaryDirectory(dir=temp_base) as temp, patch.object(file_ops, "WORKSPACE", Path(temp)):
+            result = file_ops.write_file("/workspace/large.txt", "A", repeat=10000)
+            self.assertEqual(result["result"]["characters_written"], 10000)
+            self.assertEqual((Path(temp) / "large.txt").read_bytes(), b"A" * 10000)
+            self.assertFalse(file_ops.write_file("/workspace/oversized.txt", "😀", repeat=100000)["ok"])
+            self.assertFalse((Path(temp) / "oversized.txt").exists())
+
+    def test_llama_quoted_repeat_is_normalized(self):
+        tool = {"name": "write_file", "args": {
+            "path": "/workspace/large.txt", "content": "A", "repeat": "10000",
+        }}
+        with patch.object(harness, "call_tool", return_value=success({})) as dispatch:
+            self.assertTrue(harness._call(tool, False)["ok"])
+        dispatch.assert_called_once_with("write_file", {
+            "path": "/workspace/large.txt", "content": "A", "repeat": 10000,
+        })
+
+    def test_explicit_repeat_and_readback_use_file_tools_without_ollama(self):
+        temp_base = "/workspace" if Path("/workspace").is_dir() else None
+        task = ("Write exactly 10000 uppercase A characters to /workspace/large.txt. Then read the file back. "
+                "Tell me how many characters it contains and summarize the content briefly.")
+        with TemporaryDirectory(dir=temp_base) as temp, patch.object(file_ops, "WORKSPACE", Path(temp)), \
+                patch.object(harness, "ask_llm") as ask:
+            result = harness._loop(task, False)
+            self.assertEqual((Path(temp) / "large.txt").read_bytes(), b"A" * 10000)
+            retry = harness._loop("Write 10,000 B's to /workspace/large.txt and read it back.", False)
+            self.assertIn("/approve", retry.answer)
+            self.assertEqual((Path(temp) / "large.txt").read_bytes(), b"A" * 10000)
+        self.assertTrue(result.succeeded)
+        self.assertIn("read back 10,000", result.answer)
+        ask.assert_not_called()
+
+    def test_ollama_timeout_retries_at_most_three_times(self):
+        with patch.object(planner.requests, "post", side_effect=requests.ReadTimeout) as post:
+            with self.assertRaisesRegex(planner.OllamaError, "4 attempts"):
+                planner.ask_llm([])
+        self.assertEqual(post.call_count, 4)
+        self.assertTrue(all(call.kwargs["timeout"].total <= 30 for call in post.call_args_list))
+
+    def test_gateway_timeout_recovers_on_next_attempt(self):
+        with patch.object(planner.requests, "post") as post:
+            first = requests.Response()
+            first.status_code = 504
+            second = requests.Response()
+            second.status_code = 200
+            second._content = b'{"message": {"content": "Ready"}}'
+            post.side_effect = [first, second]
+            self.assertEqual(planner.ask_llm([]), "Ready")
+            self.assertEqual(post.call_count, 2)
 
     def test_provider_outage_does_not_repeat_with_different_queries(self):
         with patch.object(harness, "ask_llm", side_effect=[
@@ -149,10 +255,10 @@ class RequestBoundaryTests(unittest.TestCase):
         self.assertTrue(outcome.succeeded)
 
     def test_raw_tool_json_is_neither_dispatched_nor_delivered(self):
-        raw = '```arduino\n{"name": "run_code", "parameters": {"code": "import os"}}\n```'
+        raw = '```arduino\n{"name": "run_code", "parameters": {"code": "print(42)"}}\n```'
         with patch.object(harness, "ask_llm", return_value=raw) as ask, patch.object(harness, "call_tool") as tool, \
                 patch.object(harness, "send_telegram", return_value=success({})) as send:
-            answer = harness.run("run import os")
+            answer = harness.run("Run a Python calculation")
         self.assertEqual(ask.call_count, 2)
         self.assertIn("invalid tool call", answer)
         self.assertNotIn("parameters", answer)
@@ -163,11 +269,28 @@ class RequestBoundaryTests(unittest.TestCase):
         reply = 'TOOL: run_code\nARGS: {"code":"import os"}'
         with patch.object(harness, "ask_llm", return_value=reply) as ask, \
                 patch.object(harness, "send_telegram", return_value=success({})) as send, patch.object(requests, "Session") as session:
-            answer = harness.run("run import os")
+            answer = harness.run("Run a Python calculation")
         self.assertEqual(ask.call_count, 1)
-        self.assertEqual(answer, "The snippet contains a prohibited operation.")
+        self.assertEqual(answer, PROHIBITED_REPLY)
         session.assert_not_called()
         send.assert_called_once_with(answer)
+
+    def test_open_variants_are_refused_before_planning_or_execution(self):
+        for code in ("open('/etc/passwd').read()", "open ('relative.txt').read()", "open\t('relative.txt')"):
+            with self.subTest(code=code), patch.object(harness, "ask_llm") as ask, patch.object(requests, "Session") as session:
+                result = mcp.call_tool("run_code", {"code": code})
+                self.assertEqual(result["error"], PROHIBITED_REPLY)
+                outcome = harness._loop(f"Run this code: {code}", False)
+                self.assertEqual(outcome.answer, PROHIBITED_REPLY)
+                ask.assert_not_called()
+                session.assert_not_called()
+
+    def test_model_output_cannot_offer_blocked_code(self):
+        for reply in ("Try `open('relative.txt')` instead.", "Try `import math, os` first.", "Use `cat /etc/passwd`."):
+            with self.subTest(reply=reply), patch.object(harness, "ask_llm", return_value=reply), \
+                    patch.object(harness, "send_telegram", return_value=success({})) as send:
+                self.assertEqual(harness.run("How should I write this snippet?"), PROHIBITED_REPLY)
+                send.assert_called_once_with(PROHIBITED_REPLY)
 
 
 class TelegramReliabilityTests(unittest.TestCase):
